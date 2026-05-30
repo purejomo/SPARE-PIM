@@ -25,6 +25,7 @@ class SPAREPIMTrace final : public IFrontEnd, public Implementation {
       int mac_commands = 0;
       int acc_commands = 0;
       int voc_count = 0;
+      std::vector<int> vocs;
     };
 
     std::vector<Trace> m_trace;
@@ -129,6 +130,9 @@ class SPAREPIMTrace final : public IFrontEnd, public Implementation {
       req.scratchpad[1] = t.total_voc;
       req.scratchpad[2] = t.mac_commands;
       req.scratchpad[3] = t.acc_commands;
+      if (!t.vocs.empty()) {
+        req.m_payload = const_cast<std::vector<int>*>(&t.vocs);
+      }
 
       bool request_sent = m_memory_system->send(req);
       if (request_sent) {
@@ -232,6 +236,7 @@ class SPAREPIMTrace final : public IFrontEnd, public Implementation {
           m_default_mac_commands,
           m_default_acc_commands,
           0,
+          {},
         });
       }
       m_logger->info("Generated {} fixed SPARE-PIM tokens.", m_trace.size());
@@ -314,6 +319,7 @@ class SPAREPIMTrace final : public IFrontEnd, public Implementation {
       trace.mac_commands = m_default_mac_commands;
       trace.acc_commands = m_default_acc_commands;
       trace.voc_count = vocs.size();
+      trace.vocs = vocs;
       return trace;
     }
 

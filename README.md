@@ -85,9 +85,11 @@ pseudochannel, four BGMUs each hold four BPU VOC values, so one sparse PV step
 provides 16 VOC values to the memory controller. Each value is bounded by the
 FSU width, so the default maximum is 16.
 
-The frontend computes `max_voc` and `total_voc`, stores them in the request
-scratchpad, and waits for the controller callback so the simulation ends only
-after the full ESEF command queue completes.
+For `VOC` lines, the frontend forwards the VOC list to the controller. The
+controller scans the BGMU register groups, computes `max_count`, and uses that
+value to set the dynamic `SPM(max_count)` latency. The frontend waits for the
+controller callback so the simulation ends only after the full ESEF command
+queue completes.
 
 ## Important Files
 

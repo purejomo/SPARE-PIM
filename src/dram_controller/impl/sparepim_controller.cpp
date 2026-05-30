@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <deque>
+#include <vector>
 
 #include "dram_controller/controller.h"
 #include "memory_system/memory_system.h"
@@ -24,6 +25,14 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
       int cycles = 0;
       Request request {0, Request::Type::Read};
       bool has_request = false;
+    };
+
+    struct VOCSummary {
+      int max_voc = 0;
+      int total_voc = 0;
+      int bgmu_reads = 0;
+      int voc_values = 0;
+      int max_updates = 0;
     };
 
     std::deque<Request> m_request_queue;
@@ -90,6 +99,7 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
     size_t s_sparepim_pre_cmds = 0;
     size_t s_sparepim_bgmu_reads = 0;
     size_t s_sparepim_bgmu_voc_values = 0;
+    size_t s_sparepim_bgmu_max_updates = 0;
     size_t s_sparepim_bgmu_read_cycles = 0;
     size_t s_sparepim_spm_cycles = 0;
     size_t s_sparepim_skipped_spm = 0;
@@ -170,6 +180,7 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
       register_stat(s_sparepim_pre_cmds).name("sparepim_pre_cmds_{}", m_channel_id);
       register_stat(s_sparepim_bgmu_reads).name("sparepim_bgmu_reads_{}", m_channel_id);
       register_stat(s_sparepim_bgmu_voc_values).name("sparepim_bgmu_voc_values_{}", m_channel_id);
+      register_stat(s_sparepim_bgmu_max_updates).name("sparepim_bgmu_max_updates_{}", m_channel_id);
       register_stat(s_sparepim_bgmu_read_cycles).name("sparepim_bgmu_read_cycles_{}", m_channel_id);
       register_stat(s_sparepim_spm_cycles).name("sparepim_spm_cycles_{}", m_channel_id);
       register_stat(s_sparepim_skipped_spm).name("sparepim_skipped_spm_{}", m_channel_id);
@@ -278,8 +289,9 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
       s_sparepim_tokens++;
 
       AddrVec_t base_addr = normalize_addr(req.addr_vec);
-      int max_voc = std::max(0, req.scratchpad[0]);
-      int total_voc = std::max(0, req.scratchpad[1]);
+      VOCSummary voc_summary = read_bgmu_vocs_and_find_max(req);
+      int max_voc = voc_summary.max_voc;
+      int total_voc = voc_summary.total_voc;
       int mac_commands = req.scratchpad[2] > 0 ? req.scratchpad[2] : m_mac_commands_per_token;
       int acc_commands = req.scratchpad[3] > 0 ? req.scratchpad[3] : m_acc_commands_per_token;
 
@@ -289,13 +301,14 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
 
       s_sparepim_total_voc += total_voc;
       s_sparepim_max_voc_sum += max_voc;
+      s_sparepim_bgmu_max_updates += voc_summary.max_updates;
 
       enqueue_qk_stage(base_addr, mac_commands);
 
       AddrVec_t elemax_addr = make_all_bank_addr(make_esdm_addr(base_addr, m_kt_row_offset, m_kt_col_start));
       enqueue_command(m_cmd_mov, elemax_addr);
       enqueue_command(m_cmd_emul, elemax_addr);
-      enqueue_bgmu_read_delay();
+      enqueue_bgmu_read_delay(voc_summary.bgmu_reads, voc_summary.voc_values);
 
       if (max_voc == 0) {
         s_sparepim_skipped_spm++;
@@ -337,6 +350,42 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
 
     int total_bank_count() const {
       return m_num_pchs * m_num_bgs * m_num_banks;
+    }
+
+    VOCSummary read_bgmu_vocs_and_find_max(const Request& req) const {
+      VOCSummary summary;
+      const auto* vocs = static_cast<const std::vector<int>*>(req.m_payload);
+      if (vocs != nullptr && !vocs->empty()) {
+        int vocs_per_bgmu = std::max(1, m_num_banks);
+        summary.bgmu_reads = ceil_div(vocs->size(), vocs_per_bgmu);
+
+        for (int bg = 0; bg < summary.bgmu_reads; bg++) {
+          int base_idx = bg * vocs_per_bgmu;
+          for (int bank = 0; bank < vocs_per_bgmu; bank++) {
+            int voc_idx = base_idx + bank;
+            if (voc_idx >= static_cast<int>(vocs->size())) {
+              break;
+            }
+
+            int tmp = std::max(0, (*vocs)[voc_idx]);
+            summary.voc_values++;
+            summary.total_voc += tmp;
+            if (tmp > summary.max_voc) {
+              summary.max_voc = tmp;
+              summary.max_updates++;
+            }
+          }
+        }
+
+        return summary;
+      }
+
+      summary.max_voc = std::max(0, req.scratchpad[0]);
+      summary.total_voc = std::max(0, req.scratchpad[1]);
+      summary.bgmu_reads = m_num_bgs;
+      summary.voc_values = m_num_bgs * m_num_banks;
+      summary.max_updates = summary.max_voc > 0 ? 1 : 0;
+      return summary;
     }
 
     AddrVec_t make_esdm_addr(AddrVec_t addr_vec, int row_offset, int column) const {
@@ -501,13 +550,14 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
       }
     }
 
-    void enqueue_bgmu_read_delay() {
+    void enqueue_bgmu_read_delay(int bgmu_reads, int voc_values) {
+      int read_count = std::max(1, bgmu_reads);
       int bgmu_read_latency = m_dram->m_timing_vals("nCL") +
-                              (m_num_bgs - 1) * m_dram->m_timing_vals("nCCDS") +
+                              (read_count - 1) * m_dram->m_timing_vals("nCCDS") +
                               m_dram->m_timing_vals("nBL");
 
-      s_sparepim_bgmu_reads += m_num_bgs;
-      s_sparepim_bgmu_voc_values += m_num_bgs * m_num_banks;
+      s_sparepim_bgmu_reads += read_count;
+      s_sparepim_bgmu_voc_values += voc_values > 0 ? voc_values : read_count * m_num_banks;
       s_sparepim_bgmu_read_cycles += bgmu_read_latency;
 
       if (!m_bgmu_read_as_delay) {

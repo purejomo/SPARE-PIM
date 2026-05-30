@@ -16,7 +16,7 @@ The implementation currently has two layers:
 | SPARE-PIM RFU commands: `MAC`, `EMUL`, `MOV`, `SPM`, `ACC` | Implemented | `src/dram/impl/HBM3.cpp` |
 | Command timing: `MAC/EMUL=tCCDL`, `MOV=tCCDS`, `ACC=tCCDL+1`, dynamic `SPM` | Implemented | `src/dram/impl/HBM3.cpp`, `src/dram_controller/impl/sparepim_controller.cpp` |
 | ESEF flow: QK -> Elemax -> sparse PV -> ACC | Implemented as a performance model | `src/dram_controller/impl/sparepim_controller.cpp` |
-| VOC-based dynamic SPM latency | Implemented | `notify("sparepim_spm_latency", ...)` |
+| VOC-based max-count scan and dynamic SPM latency | Implemented | `read_bgmu_vocs_and_find_max()`, `notify("sparepim_spm_latency", ...)` |
 | BGMU READ latency equation | Implemented as controller-local delay | `enqueue_bgmu_read_delay()` |
 | `VOC=0` skip of sparse `ACT-SPM-PRE` | Implemented | `expand_sparepim_token()` |
 | ESDM K/V row-column mapping | Implemented as timing/page-hit model | `enqueue_qk_stage()`, `enqueue_sparse_pv_stage()` |
@@ -147,13 +147,16 @@ ESEF executes SDPA in one pass:
 1. `enqueue_qk_stage(base_addr, mac_commands)`
 2. `MOV`
 3. `EMUL`
-4. `enqueue_bgmu_read_delay()`
-5. Skip sparse PV when `max_voc == 0`
-6. `enqueue_sparse_pv_stage(base_addr, max_voc)` when `max_voc > 0`
-7. Repeated `ACC`
-8. Complete the request callback
+4. `read_bgmu_vocs_and_find_max(req)`
+5. `enqueue_bgmu_read_delay(bgmu_reads, voc_values)`
+6. Skip sparse PV when `max_count == 0`
+7. `enqueue_sparse_pv_stage(base_addr, max_count)` when `max_count > 0`
+8. Repeated `ACC`
+9. Complete the request callback
 
-The frontend places metadata in the request scratchpad:
+For `VOC` trace lines, the frontend attaches the full BPU VOC vector to the
+request payload. The controller scans this vector as BGMU register groups. The
+scratchpad remains available for compact aggregate token formats:
 
 ```cpp
 req.scratchpad[0] = t.max_voc;
@@ -194,8 +197,9 @@ VOC metadata:
 - `MOV` appears at the correct point in ESEF.
 - `EMUL` appears after `MOV`.
 - DSSE metadata generation adds no separate latency.
-- VOC is provided by `SPAREPIMTrace`.
-- `max_voc` drives dynamic SPM latency and zero-VOC skip.
+- BPU-level VOC values are provided by `SPAREPIMTrace`.
+- The controller scans VOC values in BGMU groups and computes `max_count`.
+- `max_count` drives dynamic SPM latency and zero-VOC skip.
 
 Validation currently happens on the metadata input:
 
@@ -228,10 +232,15 @@ L_BGMU = tCL + (N_BG - 1) * tCCD_S + tBURST
 
 ### Code Mapping
 
-`SPAREPIMController::enqueue_bgmu_read_delay()` implements the equation:
+`SPAREPIMController::read_bgmu_vocs_and_find_max()` implements the max-count
+scan from Algorithm 1. It treats each BGMU register group as four bank/BPU VOC
+values, updates the running maximum, and records how many VOC values were read.
+
+`SPAREPIMController::enqueue_bgmu_read_delay()` implements the BGMU READ
+latency equation:
 
 ```cpp
-int bgmu_read_latency = nCL + (m_num_bgs - 1) * nCCDS + nBL;
+int bgmu_read_latency = nCL + (read_count - 1) * nCCDS + nBL;
 ```
 
 This is modeled as a controller-local delay in DRAM cycles. It is synchronized
@@ -260,7 +269,7 @@ VOC among the bankgroups participating in the sparse PV operation.
 
 ### Code Mapping
 
-The controller computes:
+The controller computes `max_voc` by scanning the VOC payload. It then computes:
 
 ```text
 spm_latency = spm_fixed_cycles + max_voc * spm_cycles_per_voc

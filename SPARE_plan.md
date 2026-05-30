@@ -83,6 +83,9 @@ The controller expands one `spare-pim` request as follows:
    - Issue `EMUL`.
    - Model DSSE VDI/VOC generation as fully overlapped with `EMUL`.
 3. BGMU READ stage
+   - Read BGMU VOC register groups from the token metadata payload.
+   - Each BGMU register group contains one VOC per bank/BPU.
+   - Update `max_count` while scanning the VOC values.
    - Model BGMU reads as a controller-local delay.
    - Latency:
 
@@ -91,9 +94,9 @@ L_BGMU = nCL + (N_BG - 1) * nCCDS + nBL
 ```
 
 4. Sparse PV stage
-   - Use `max_voc` from the token metadata.
-   - If `max_voc == 0`, skip sparse `ACT-SPM-PRE`.
-   - If `max_voc > 0`, update `nSPM` through the DRAM notify hook and issue
+   - Use the controller-computed `max_count`.
+   - If `max_count == 0`, skip sparse `ACT-SPM-PRE`.
+   - If `max_count > 0`, update `nSPM` through the DRAM notify hook and issue
      sparse PV commands.
 5. Accumulation stage
    - Issue `ACC` commands for partial-sum transfer and accumulation.
@@ -102,7 +105,8 @@ L_BGMU = nCL + (N_BG - 1) * nCCDS + nBL
 
 ### Request Scratchpad ABI
 
-The `SPAREPIM` controller interprets `Request::scratchpad` as:
+For aggregate token formats, the `SPAREPIM` controller still accepts compact
+metadata through `Request::scratchpad`:
 
 ```text
 scratchpad[0] = max_voc
@@ -110,6 +114,10 @@ scratchpad[1] = total_voc
 scratchpad[2] = per-token MAC command override, 0 means use default
 scratchpad[3] = per-token ACC command override, 0 means use default
 ```
+
+For `VOC` trace lines, the frontend attaches the full BPU VOC vector as the
+request payload. The controller scans this vector in BGMU groups, computes
+`max_count`, and then configures `SPM(max_count)`.
 
 ### Important Config Parameters
 
@@ -133,6 +141,8 @@ scratchpad[3] = per-token ACC command override, 0 means use default
 - `sparepim_spm_cmds`
 - `sparepim_acc_cmds`
 - `sparepim_bgmu_reads`
+- `sparepim_bgmu_voc_values`
+- `sparepim_bgmu_max_updates`
 - `sparepim_bgmu_read_cycles`
 - `sparepim_spm_cycles`
 - `sparepim_skipped_spm`
@@ -329,7 +339,9 @@ Expected simulation behavior:
 
 - Token-level ESEF command sequences are simulated.
 - Nonzero VOC tokens update dynamic SPM latency.
-- BGMU READ cycles follow `nCL + (N_BG - 1) * nCCDS + nBL`.
+- BGMU READ cycles follow `nCL + (N_BG - 1) * nCCDS + nBL`, where `N_BG`
+  is the number of BGMU register groups read for the current pseudochannel-local
+  sparse PV step.
 
 ### Corner Cases
 
