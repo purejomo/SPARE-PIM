@@ -17,9 +17,11 @@ execution path.
 - A `SPAREPIMTrace` frontend for synthetic or trace-driven inference timing
   experiments
 
-The current simulator is primarily a performance/timing model. The FP16
-functional dataflow model and golden-output comparison flow are planned in
-`SPARE_plan.md`.
+The simulator integrates both a **performance/timing model** and an **exact FP16 functional dataflow simulator**:
+- Contains a standalone C++ Golden Model for exact IEEE-754 FP16 Elemax-SDPA computations.
+- Simulates physical bank-resident memory (`BankStorage`) with realistic ESDM (Elemax-based SDPA Data Mapping) row-column layouts.
+- Executes token-by-token tensor operations alongside the simulated trace, mimicking true hardware MAC, MOV, EMUL, and sparse SPM behavior.
+- Validates the hardware functional outputs against the Golden Model at the end of the simulation.
 
 ## Build
 
@@ -62,6 +64,30 @@ Useful output statistics include:
 - `sparepim_skipped_spm`
 - `sparepim_acc_cmds`
 
+## Functional Simulator Configuration
+
+To enable the FP16 functional dataflow verification, make sure `enable_functional: true` is set under the `Controller` configuration in your YAML file.
+
+```yaml
+  Controller:
+    impl: SPAREPIM
+    enable_functional: true
+    # Model parameters for generating reference data
+    seq_len: 256
+    d_head: 64
+    kt_row_offset: 0
+    v_row_offset: 100
+```
+*Note: Ensure that `kt_row_offset` and `v_row_offset` are spaced far enough apart to prevent physical row overlaps during simulated `BankStorage` mapping!*
+
+When enabled, you will see a validation summary at the end of the simulation run:
+```text
+==========================================
+[SPARE-PIM] Finalizing Functional Simulation
+[SPARE-PIM] Status: PASSED (Outputs match Golden Model for 4 tokens)
+==========================================
+```
+
 ## Trace Format
 
 `SPAREPIMTrace` accepts several compact token formats.
@@ -80,16 +106,7 @@ VOC 9,12,7,10,8,11,13,6,14,9,10,12,7,8,11,15 0x0
 VOC 4,6,5,7,3,8,6,5,9,4,7,6,5,3,8,4 0x40
 ```
 
-The `VOC` list is BPU-level metadata, not a per-token bitmask. For each
-pseudochannel, four BGMUs each hold four BPU VOC values, so one sparse PV step
-provides 16 VOC values to the memory controller. Each value is bounded by the
-FSU width, so the default maximum is 16.
-
-For `VOC` lines, the frontend forwards the VOC list to the controller. The
-controller scans the BGMU register groups, computes `max_count`, and uses that
-value to set the dynamic `SPM(max_count)` latency. The frontend waits for the
-controller callback so the simulation ends only after the full ESEF command
-queue completes.
+The `VOC` list provides BPU-level sparsity metadata. The controller uses this to compute `max_count`, dynamically setting the `SPM(max_count)` latency to simulate zero-skipping.
 
 ## Important Files
 
