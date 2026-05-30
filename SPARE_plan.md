@@ -174,9 +174,10 @@ The frontend can also generate a fixed synthetic trace when no path is provided:
 ### Validation
 
 - Clamp negative VOC entries to zero.
-- Validate the VOC list length against the configured bankgroup count when
+- Validate the VOC list length against the BPU count per pseudochannel when
   `validate_voc_count=true`.
-- Reject `max_voc > seq_len` when `seq_len > 0`.
+- Reject `max_voc > max_voc_per_bpu`.
+- Reject `total_voc > expected_voc_count * max_voc_per_bpu`.
 - Reject `max_voc > total_voc` when `total_voc > 0`.
 
 ### Model Parameters
@@ -190,10 +191,12 @@ Supported model/workload parameters include:
 - `d_head`
 - `batch_size`
 - `fsu_width`
+- `max_voc_per_bpu`
+- `expected_voc_count`
 
 ### Status
 
-Implemented and smoke-tested with `example_sparepim.trace`.
+Implemented and validated with `example_sparepim.trace`.
 
 ## 4. ESDM Address Mapping And Page-Hit Model
 
@@ -307,7 +310,7 @@ Planned. Not implemented yet.
 
 ## 6. Validation Plan
 
-### Build And Smoke Tests
+### Build And Run
 
 - Configure and build:
 
@@ -316,16 +319,15 @@ cmake -S . -B build
 cmake --build build -j$(nproc)
 ```
 
-- Run the example:
+- Run the SPARE-PIM configuration:
 
 ```bash
 ./build/ramulator2 -f example_config_sparepim.yaml
 ```
 
-Expected smoke-test behavior:
+Expected simulation behavior:
 
-- Three tokens are simulated.
-- One all-zero VOC token skips sparse `ACT-SPM-PRE`.
+- Token-level ESEF command sequences are simulated.
 - Nonzero VOC tokens update dynamic SPM latency.
 - BGMU READ cycles follow `nCL + (N_BG - 1) * nCCDS + nBL`.
 
@@ -340,8 +342,9 @@ Expected smoke-test behavior:
   - `SPM` latency uses `max(VOC)`, not `total_voc`.
 - Invalid VOC metadata:
   - Negative values are clamped.
-  - `max_voc > seq_len` is rejected when `seq_len` is configured.
+  - `max_voc > max_voc_per_bpu` is rejected.
   - `max_voc > total_voc` is rejected.
+  - `total_voc > expected_voc_count * max_voc_per_bpu` is rejected.
 - Large VOC:
   - ESDM row splitting is used when the active range exceeds the configured
     columns per row.

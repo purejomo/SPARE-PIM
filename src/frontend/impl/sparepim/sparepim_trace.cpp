@@ -46,6 +46,7 @@ class SPAREPIMTrace final : public IFrontEnd, public Implementation {
     int m_sparepim_req_id = -1;
     int m_seq_len = 0;
     int m_expected_voc_count = -1;
+    int m_max_voc_per_bpu = -1;
     bool m_validate_voc_count = true;
 
     Logger_t m_logger;
@@ -71,10 +72,14 @@ class SPAREPIMTrace final : public IFrontEnd, public Implementation {
       m_default_acc_commands = param<int>("acc_commands_per_token").default_val(0);
       m_seq_len = param<int>("seq_len").default_val(0);
       m_expected_voc_count = param<int>("expected_voc_count").default_val(-1);
+      m_max_voc_per_bpu = param<int>("max_voc_per_bpu").default_val(-1);
       m_validate_voc_count = param<bool>("validate_voc_count").default_val(true);
 
       if (m_default_mac_commands < 0) {
         m_default_mac_commands = m_d_head > 0 ? ceil_div(m_d_head, std::max(1, m_fsu_width)) : 0;
+      }
+      if (m_max_voc_per_bpu <= 0) {
+        m_max_voc_per_bpu = std::max(1, m_fsu_width);
       }
 
       m_logger = Logging::create_logger("SPAREPIMTrace");
@@ -103,7 +108,9 @@ class SPAREPIMTrace final : public IFrontEnd, public Implementation {
       IDRAM* dram = memory_system->get_ifce<IDRAM>();
       m_sparepim_req_id = dram->m_requests("spare-pim");
       if (m_expected_voc_count <= 0) {
-        m_expected_voc_count = dram->get_level_size("bankgroup");
+        int num_bankgroups = std::max(1, dram->get_level_size("bankgroup"));
+        int num_banks = std::max(1, dram->get_level_size("bank"));
+        m_expected_voc_count = num_bankgroups * num_banks;
       }
       validate_trace();
     }
@@ -319,18 +326,18 @@ class SPAREPIMTrace final : public IFrontEnd, public Implementation {
             m_expected_voc_count > 0 &&
             trace.voc_count != m_expected_voc_count) {
           throw ConfigurationError(
-              "SPARE-PIM trace token {} has {} VOC entries, but expected {} bankgroup entries.",
+              "SPARE-PIM trace token {} has {} VOC entries, but expected {} BPU entries per pseudochannel.",
               i,
               trace.voc_count,
               m_expected_voc_count);
         }
 
-        if (m_seq_len > 0 && trace.max_voc > m_seq_len) {
+        if (trace.max_voc > m_max_voc_per_bpu) {
           throw ConfigurationError(
-              "SPARE-PIM trace token {} has max_voc {}, which exceeds seq_len {}.",
+              "SPARE-PIM trace token {} has max_voc {}, which exceeds max_voc_per_bpu {}.",
               i,
               trace.max_voc,
-              m_seq_len);
+              m_max_voc_per_bpu);
         }
 
         if (trace.total_voc > 0 && trace.max_voc > trace.total_voc) {
@@ -339,6 +346,16 @@ class SPAREPIMTrace final : public IFrontEnd, public Implementation {
               i,
               trace.max_voc,
               trace.total_voc);
+        }
+
+        int max_total_voc = m_expected_voc_count * m_max_voc_per_bpu;
+        if (max_total_voc > 0 && trace.total_voc > max_total_voc) {
+          throw ConfigurationError(
+              "SPARE-PIM trace token {} has total_voc {}, which exceeds {} BPU entries x {} max VOC.",
+              i,
+              trace.total_voc,
+              m_expected_voc_count,
+              m_max_voc_per_bpu);
         }
       }
     }

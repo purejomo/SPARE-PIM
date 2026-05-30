@@ -3,10 +3,13 @@ Frontend:
   clock_ratio: 1
   path: example_sparepim.trace
 
+  # GPT-baby scale configuration from the SPARE-PIM experiment table.
   # The FSU processes 16 FP16 elements per SIMD command.
   seq_len: 256
   d_head: 64
   fsu_width: 16
+  max_voc_per_bpu: 16
+  expected_voc_count: 16
   validate_voc_count: true
   acc_commands_per_token: 2
 
@@ -20,10 +23,10 @@ MemorySystem:
       preset: HBM3_2Gb
       channel: 1
       pseudochannel: 2
-      bankgroup: 8
+      bankgroup: 4
       bank: 4
       row: 8192
-      column: 32
+      column: 64
     timing:
       preset: HBM3_2Gbps
 
@@ -50,9 +53,8 @@ MemorySystem:
     enable_esdm: true
     enable_qk_act_pre: true
 
-    # Small value for demonstration: token 2 splits max_voc=6 into 4+2 SPM work.
-    # For paper-scale experiments, omit this field or set it to the DRAM column count.
-    esdm_columns_per_row: 4
+    # Match the configured HBM3 column count for ESDM row-column placement.
+    esdm_columns_per_row: 64
 
   AddrMapper:
     impl: ChRaBaRoCo

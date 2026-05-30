@@ -89,6 +89,7 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
     size_t s_sparepim_act_cmds = 0;
     size_t s_sparepim_pre_cmds = 0;
     size_t s_sparepim_bgmu_reads = 0;
+    size_t s_sparepim_bgmu_voc_values = 0;
     size_t s_sparepim_bgmu_read_cycles = 0;
     size_t s_sparepim_spm_cycles = 0;
     size_t s_sparepim_skipped_spm = 0;
@@ -168,6 +169,7 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
       register_stat(s_sparepim_act_cmds).name("sparepim_act_cmds_{}", m_channel_id);
       register_stat(s_sparepim_pre_cmds).name("sparepim_pre_cmds_{}", m_channel_id);
       register_stat(s_sparepim_bgmu_reads).name("sparepim_bgmu_reads_{}", m_channel_id);
+      register_stat(s_sparepim_bgmu_voc_values).name("sparepim_bgmu_voc_values_{}", m_channel_id);
       register_stat(s_sparepim_bgmu_read_cycles).name("sparepim_bgmu_read_cycles_{}", m_channel_id);
       register_stat(s_sparepim_spm_cycles).name("sparepim_spm_cycles_{}", m_channel_id);
       register_stat(s_sparepim_skipped_spm).name("sparepim_skipped_spm_{}", m_channel_id);
@@ -505,6 +507,7 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
                               m_dram->m_timing_vals("nBL");
 
       s_sparepim_bgmu_reads += m_num_bgs;
+      s_sparepim_bgmu_voc_values += m_num_bgs * m_num_banks;
       s_sparepim_bgmu_read_cycles += bgmu_read_latency;
 
       if (!m_bgmu_read_as_delay) {

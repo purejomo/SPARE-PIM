@@ -35,19 +35,19 @@ The build produces the standalone simulator at:
 ./build/ramulator2
 ```
 
-## Run The SPARE-PIM Example
+## Run A SPARE-PIM Simulation
 
 ```bash
 cd /home/ghlee/SPARE-PIM
 ./build/ramulator2 -f example_config_sparepim.yaml
 ```
 
-The example uses:
+The configuration uses:
 
 - `SPAREPIMTrace` frontend
 - `SPAREPIM` controller
 - HBM3 timing overrides in YAML
-- `example_sparepim.trace` as a small VOC trace
+- `example_sparepim.trace` as a compact per-BPU VOC metadata trace
 
 Useful output statistics include:
 
@@ -76,10 +76,14 @@ max_voc total_voc [addr] [mac_cmds] [acc_cmds]
 For example:
 
 ```text
-VOC 0,0,0,0,0,0,0,0 0x0
-VOC 1,3,2,0,1,0,0,1 0x40
-VOC 6,1,0,0,0,0,0,0 0x80
+VOC 9,12,7,10,8,11,13,6,14,9,10,12,7,8,11,15 0x0
+VOC 4,6,5,7,3,8,6,5,9,4,7,6,5,3,8,4 0x40
 ```
+
+The `VOC` list is BPU-level metadata, not a per-token bitmask. For each
+pseudochannel, four BGMUs each hold four BPU VOC values, so one sparse PV step
+provides 16 VOC values to the memory controller. Each value is bounded by the
+FSU width, so the default maximum is 16.
 
 The frontend computes `max_voc` and `total_voc`, stores them in the request
 scratchpad, and waits for the controller callback so the simulation ends only
@@ -88,7 +92,7 @@ after the full ESEF command queue completes.
 ## Important Files
 
 - `example_config_sparepim.yaml`: Minimal SPARE-PIM experiment configuration
-- `example_sparepim.trace`: Small VOC trace for smoke testing
+- `example_sparepim.trace`: Per-BPU VOC metadata trace
 - `src/dram/impl/HBM3.cpp`: HBM3 command and timing extensions
 - `src/dram_controller/impl/sparepim_controller.cpp`: SPARE-PIM controller
 - `src/frontend/impl/sparepim/sparepim_trace.cpp`: SPARE-PIM trace frontend

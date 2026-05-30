@@ -199,9 +199,9 @@ VOC metadata:
 
 Validation currently happens on the metadata input:
 
-- VOC list length can be checked against the bankgroup count.
+- VOC list length can be checked against the BPU count per pseudochannel.
 - Negative VOC entries are clamped to zero.
-- `max_voc > seq_len` is rejected when `seq_len` is configured.
+- `max_voc > max_voc_per_bpu` is rejected.
 - `max_voc > total_voc` is rejected.
 
 ### Status
@@ -353,9 +353,9 @@ the full ESEF command sequence rather than only request enqueue.
 
 Implemented.
 
-## 10. Example Configuration
+## 10. Simulation Configuration
 
-`example_config_sparepim.yaml` demonstrates the integrated path:
+`example_config_sparepim.yaml` provides a compact SPARE-PIM simulation setup:
 
 - Frontend: `SPAREPIMTrace`
 - Controller: `SPAREPIM`
@@ -365,13 +365,15 @@ Implemented.
 - BGMU READ modeled as controller-local delay
 - SPM latency set by `spm_cycles_per_voc`
 
-The example trace includes:
+The trace contains per-BPU VOC metadata:
 
-- an all-zero VOC token
-- nonzero sparse tokens
-- different `max_voc` values
+- one token-level work item per line
+- one VOC count per BPU participating in a pseudochannel-local sparse PV step
+- four BGMU registers per pseudochannel, each holding four bank/BPU VOC values
+- each VOC count is bounded by the FSU width, which is 16 by default
 
-This verifies the skip path, dynamic SPM latency, and BGMU READ accounting.
+This drives dynamic SPM latency and BGMU READ accounting without embedding a
+full per-token bitmask in the trace.
 
 ## 11. Functional Model Gap
 
