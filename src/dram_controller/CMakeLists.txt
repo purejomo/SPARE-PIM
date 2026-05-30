@@ -14,7 +14,8 @@ target_sources(
   impl/dummy_controller.cpp
   impl/generic_dram_controller.cpp
   impl/prac_dram_controller.cpp
-  
+  impl/sparepim_controller.cpp
+
   impl/scheduler/bh_scheduler.cpp
   impl/scheduler/blocking_scheduler.cpp
   impl/scheduler/generic_scheduler.cpp

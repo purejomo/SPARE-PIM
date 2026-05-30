@@ -1,0 +1,58 @@
+Frontend:
+  impl: SPAREPIMTrace
+  clock_ratio: 1
+  path: example_sparepim.trace
+
+  # The FSU processes 16 FP16 elements per SIMD command.
+  seq_len: 256
+  d_head: 64
+  fsu_width: 16
+  validate_voc_count: true
+  acc_commands_per_token: 2
+
+MemorySystem:
+  impl: GenericDRAM
+  clock_ratio: 1
+
+  DRAM:
+    impl: HBM3
+    org:
+      preset: HBM3_2Gb
+      channel: 1
+      pseudochannel: 2
+      bankgroup: 8
+      bank: 4
+      row: 8192
+      column: 32
+    timing:
+      preset: HBM3_2Gbps
+
+      # SPARE-PIM paper Table III override at 1GHz.
+      nBL: 4
+      nCL: 18
+      nRCDRD: 14
+      nRCDWR: 14
+      nRP: 14
+      nRAS: 34
+      nRC: 48
+      nCCDS: 1
+      nCCDL: 2
+      nRRDL: 6
+      nFAW: 30
+
+  Controller:
+    impl: SPAREPIM
+    queue_size: 16
+    spm_cycles_per_voc: 1
+    spm_fixed_cycles: 0
+    bgmu_read_as_delay: true
+    enable_act_spm_pre: true
+    enable_esdm: true
+    enable_qk_act_pre: true
+
+    # Small value for demonstration: token 2 splits max_voc=6 into 4+2 SPM work.
+    # For paper-scale experiments, omit this field or set it to the DRAM column count.
+    esdm_columns_per_row: 4
+
+  AddrMapper:
+    impl: ChRaBaRoCo

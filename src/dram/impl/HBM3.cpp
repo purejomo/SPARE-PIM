@@ -15,8 +15,8 @@ class HBM3 : public IDRAM, public Implementation {
     };
 
     inline static const std::map<std::string, std::vector<int>> timing_presets = {
-      //   name       rate   nBL  nCL  nRCDRD  nRCDWR  nRP  nRAS  nRC  nWR  nRTPS  nRTPL  nCWL  nCCDS  nCCDL  nRRDS  nRRDL  nWTRS  nWTRL  nRTW  nFAW  nRFC  nRFCSB  nREFI  nREFISB  nRREFD  tCK_ps
-      {"HBM3_2Gbps",  {2000,   4,   7,    7,      7,     7,   17,  19,   8,    2,     3,    2,    1,      2,     2,     3,     3,     4,    3,    15,   -1,   160,   3900,     -1,      8,   1000}},
+      //   name       rate   nBL  nCL  nRCDRD  nRCDWR  nRP  nRAS  nRC  nWR  nRTPS  nRTPL  nCWL  nCCDS  nCCDL  nRRDS  nRRDL  nWTRS  nWTRL  nRTW  nFAW  nRFC  nRFCSB  nREFI  nREFISB  nRREFD  nSPM  tCK_ps
+      {"HBM3_2Gbps",  {2000,   4,   7,    7,      7,     7,   17,  19,   8,    2,     3,    2,    1,      2,     2,     3,     3,     4,    3,    15,   -1,   160,   3900,     -1,      8,     1,   1000}},
       // TODO: Find more sources on HBM3 timings...
     };
 
@@ -35,11 +35,12 @@ class HBM3 : public IDRAM, public Implementation {
    *             Requests & Commands
    ***********************************************/
     inline static constexpr ImplDef m_commands = {
-      "ACT", 
+      "ACT",
       "PRE", "PREA",
       "RD",  "WR",  "RDA",  "WRA",
       "REFab", "REFsb",
-      "RFMab", "RFMsb"
+      "RFMab", "RFMsb",
+      "MAC", "EMUL", "MOV", "SPM", "ACC"
     };
 
     inline static const ImplLUT m_command_scopes = LUT (
@@ -49,6 +50,8 @@ class HBM3 : public IDRAM, public Implementation {
         {"RD",    "column"},  {"WR",     "column"}, {"RDA",   "column"}, {"WRA",   "column"},
         {"REFab", "channel"}, {"REFsb",  "bank"},
         {"RFMab", "channel"}, {"RFMsb",  "bank"},
+        {"MAC",   "bank"},    {"EMUL",   "bank"},   {"MOV",   "bank"},    {"SPM",   "bank"},
+        {"ACC",   "bank"},
       }
     );
 
@@ -66,17 +69,25 @@ class HBM3 : public IDRAM, public Implementation {
         {"REFsb", {false,  false,   false,   true }},
         {"RFMab", {false,  false,   false,   true }},
         {"RFMsb", {false,  false,   false,   true }},
+        {"MAC",   {false,  false,   true,    false}},
+        {"EMUL",  {false,  false,   true,    false}},
+        {"MOV",   {false,  false,   true,    false}},
+        {"SPM",   {false,  false,   true,    false}},
+        {"ACC",   {false,  false,   true,    false}},
       }
     );
 
     inline static constexpr ImplDef m_requests = {
-      "read", "write", "all-bank-refresh", "per-bank-refresh", "all-bank-rfm", "per-bank-rfm"
+      "read", "write", "all-bank-refresh", "per-bank-refresh", "all-bank-rfm", "per-bank-rfm",
+      "mac", "emul", "mov", "spm", "acc", "spare-pim"
     };
 
     inline static const ImplLUT m_request_translations = LUT (
       m_requests, m_commands, {
-        {"read", "RD"}, {"write", "WR"}, {"all-bank-refresh", "REFab"}, {"per-bank-refresh", "REFsb"}, 
-        {"all-bank-rfm", "RFMab"}, {"per-bank-rfm", "RFMsb"}, 
+        {"read", "RD"}, {"write", "WR"}, {"all-bank-refresh", "REFab"}, {"per-bank-refresh", "REFsb"},
+        {"all-bank-rfm", "RFMab"}, {"per-bank-rfm", "RFMsb"},
+        {"mac", "MAC"}, {"emul", "EMUL"}, {"mov", "MOV"}, {"spm", "SPM"}, {"acc", "ACC"},
+        {"spare-pim", "MAC"},
       }
     );
 
@@ -93,6 +104,7 @@ class HBM3 : public IDRAM, public Implementation {
       "nRTW",
       "nFAW",
       "nRFC", "nRFCSB", "nREFI", "nREFISB", "nRREFD",
+      "nSPM",
       "tCK_ps"
     };
 
@@ -169,6 +181,22 @@ class HBM3 : public IDRAM, public Implementation {
     bool check_node_open(int command, const AddrVec_t& addr_vec) override {
       int channel_id = addr_vec[m_levels["channel"]];
       return m_channels[channel_id]->check_node_open(command, addr_vec, m_clk);
+    };
+
+    void notify(std::string_view key, uint64_t value) override {
+      if (key != "sparepim_spm_latency") {
+        return;
+      }
+
+      int spm_latency = value > 0 ? static_cast<int>(value) : 1;
+      m_timing_vals("nSPM") = spm_latency;
+
+      int spm_cmd = m_commands("SPM");
+      for (auto& level_timing : m_timing_cons) {
+        for (auto& entry : level_timing[spm_cmd]) {
+          entry.val = spm_latency;
+        }
+      }
     };
 
   private:
@@ -287,6 +315,12 @@ class HBM3 : public IDRAM, public Implementation {
         }
       }
 
+      // SPM is configured dynamically by the SPARE-PIM controller. Keep a
+      // harmless default so normal HBM3 configs do not need to mention it.
+      if (m_timing_vals("nSPM") == -1) {
+        m_timing_vals("nSPM") = 1;
+      }
+
       // Check if there is any uninitialized timings
       for (int i = 0; i < m_timing_vals.size(); i++) {
         if (m_timing_vals(i) == -1) {
@@ -341,13 +375,19 @@ class HBM3 : public IDRAM, public Implementation {
           /// RAS <-> REF
           {.level = "pseudochannel", .preceding = {"ACT"}, .following = {"REFab", "RFMab"}, .latency = V("nRC")},          
           {.level = "pseudochannel", .preceding = {"PRE", "PREA"}, .following = {"REFab", "RFMab"}, .latency = V("nRP")},          
-          {.level = "pseudochannel", .preceding = {"RDA"}, .following = {"REFab", "RFMab"}, .latency = V("nRP") + V("nRTPS")},          
-          {.level = "pseudochannel", .preceding = {"WRA"}, .following = {"REFab", "RFMab"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},          
-          {.level = "pseudochannel", .preceding = {"REFab", "RFMab"}, .following = {"ACT", "REFsb", "RFMsb"}, .latency = V("nRFC")},          
+          {.level = "pseudochannel", .preceding = {"RDA"}, .following = {"REFab", "RFMab"}, .latency = V("nRP") + V("nRTPS")},
+          {.level = "pseudochannel", .preceding = {"WRA"}, .following = {"REFab", "RFMab"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},
+          {.level = "pseudochannel", .preceding = {"REFab", "RFMab"}, .following = {"ACT", "REFsb", "RFMsb"}, .latency = V("nRFC")},
 
-          /*** Same Bank Group ***/ 
+          /*** SPARE-PIM command bus timing ***/
+          {.level = "pseudochannel", .preceding = {"MAC", "EMUL"}, .following = {"MAC", "EMUL", "MOV", "SPM", "ACC"}, .latency = V("nCCDL")},
+          {.level = "pseudochannel", .preceding = {"MOV"}, .following = {"MAC", "EMUL", "MOV", "SPM", "ACC"}, .latency = V("nCCDS")},
+          {.level = "pseudochannel", .preceding = {"ACC"}, .following = {"MAC", "EMUL", "MOV", "SPM", "ACC"}, .latency = V("nCCDL") + 1},
+          {.level = "pseudochannel", .preceding = {"SPM"}, .following = {"ACT", "PRE", "PREA", "RD", "WR", "RDA", "WRA", "MAC", "EMUL", "MOV", "SPM", "ACC"}, .latency = V("nSPM")},
+
+          /*** Same Bank Group ***/
           /// CAS <-> CAS
-          {.level = "bankgroup", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA"}, .latency = V("nCCDL")},          
+          {.level = "bankgroup", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA"}, .latency = V("nCCDL")},
           {.level = "bankgroup", .preceding = {"WR", "WRA"}, .following = {"WR", "WRA"}, .latency = V("nCCDL")},          
           {.level = "bankgroup", .preceding = {"WR", "WRA"}, .following = {"RD", "RDA"}, .latency = V("nCWL") + V("nBL") + V("nWTRL")},
           /// RAS <-> RAS
@@ -359,15 +399,18 @@ class HBM3 : public IDRAM, public Implementation {
 
 
           /*** Bank ***/ 
-          {.level = "bank", .preceding = {"ACT"}, .following = {"ACT"}, .latency = V("nRC")},  
-          {.level = "bank", .preceding = {"ACT"}, .following = {"RD", "RDA"}, .latency = V("nRCDRD")},  
-          {.level = "bank", .preceding = {"ACT"}, .following = {"WR", "WRA"}, .latency = V("nRCDWR")},  
-          {.level = "bank", .preceding = {"ACT"}, .following = {"PRE"}, .latency = V("nRAS")},  
-          {.level = "bank", .preceding = {"PRE"}, .following = {"ACT"}, .latency = V("nRP")},  
-          {.level = "bank", .preceding = {"RD"},  .following = {"PRE"}, .latency = V("nRTPL")},  
-          {.level = "bank", .preceding = {"WR"},  .following = {"PRE"}, .latency = V("nCWL") + V("nBL") + V("nWR")},  
-          {.level = "bank", .preceding = {"RDA"}, .following = {"ACT", "REFsb", "RFMsb"}, .latency = V("nRTPL") + V("nRP")},  
-          {.level = "bank", .preceding = {"WRA"}, .following = {"ACT", "REFsb", "RFMsb"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},  
+          {.level = "bank", .preceding = {"ACT"}, .following = {"ACT"}, .latency = V("nRC")},
+          {.level = "bank", .preceding = {"ACT"}, .following = {"RD", "RDA"}, .latency = V("nRCDRD")},
+          {.level = "bank", .preceding = {"ACT"}, .following = {"WR", "WRA"}, .latency = V("nRCDWR")},
+          {.level = "bank", .preceding = {"ACT"}, .following = {"MAC", "EMUL", "MOV", "SPM"}, .latency = V("nRCDRD")},
+          {.level = "bank", .preceding = {"ACT"}, .following = {"PRE"}, .latency = V("nRAS")},
+          {.level = "bank", .preceding = {"PRE"}, .following = {"ACT"}, .latency = V("nRP")},
+          {.level = "bank", .preceding = {"RD"},  .following = {"PRE"}, .latency = V("nRTPL")},
+          {.level = "bank", .preceding = {"WR"},  .following = {"PRE"}, .latency = V("nCWL") + V("nBL") + V("nWR")},
+          {.level = "bank", .preceding = {"MAC", "EMUL", "MOV"}, .following = {"PRE"}, .latency = V("nRTPL")},
+          {.level = "bank", .preceding = {"SPM"}, .following = {"PRE"}, .latency = V("nSPM")},
+          {.level = "bank", .preceding = {"RDA"}, .following = {"ACT", "REFsb", "RFMsb"}, .latency = V("nRTPL") + V("nRP")},
+          {.level = "bank", .preceding = {"WRA"}, .following = {"ACT", "REFsb", "RFMsb"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},
         }
       );
       #undef V
