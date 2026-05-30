@@ -51,10 +51,13 @@ MemorySystem:
     bgmu_read_as_delay: true
     enable_act_spm_pre: true
     enable_esdm: true
+    enable_functional: true
     enable_qk_act_pre: true
 
     # Match the configured HBM3 column count for ESDM row-column placement.
     esdm_columns_per_row: 64
+    kt_row_offset: 0
+    v_row_offset: 100
 
   AddrMapper:
     impl: ChRaBaRoCo

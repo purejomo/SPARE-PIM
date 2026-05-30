@@ -366,33 +366,56 @@ Expected simulation behavior:
 - Keep `SPARE_paper_code_mapping.md` synchronized with code changes.
 - Run `git diff --check` before committing.
 
-## 7. Open Work
+## 7. Open Work (Functional Model Implementation)
 
-1. Implement bank-resident FP16 storage for K, V, and wE.
-2. Implement the functional SPARE-PIM dataflow path.
-3. Implement the dense C/C++ golden Elemax-SDPA model.
-4. Add output comparison with `abs/rel <= 1e-2`.
-5. Add optional dump files for debugging mismatches.
-6. Add larger traces for the four target model configurations.
+To successfully implement the FP16 value-level simulation and golden model comparison, the remaining work is divided into the following detailed phases:
+
+### Phase 1: Golden Model & Reference Data Generation
+1. **Dense C/C++ Elemax-SDPA Golden Model**: Implement a standalone software reference model for ESEF (QxK^T, ReLU, bitmask, wE multiplication, sparse PV, FP32 accumulation).
+2. **Random Tensor Generation**: Implement deterministic FP16 random generation (`uniform(-1, 1)` for activations, `uniform(0, 1)` for wE) to supply input data for Q, K, V, and wE.
+3. **Reference Data Dump**: Add functionality to generate and save expected outputs, intermediate scores (S), and bitmasks for testing.
+
+### Phase 2: Bank-Resident Storage & ESDM Loader
+1. **BankStorage Component**: Create a `BankStorage` structure to hold FP16 data arrays within each physical bank.
+2. **Physical Address Mapping**: Implement mapping from logical tensor indices (layer, head, token) to physical addresses (bank, row, column) using the ESDM policy.
+3. **ESDM Data Loader**: Scatter the generated K^T, V, and wE reference tensors into the `BankStorage` before the simulation begins.
+
+### Phase 3: Functional SPARE-PIM Dataflow Execution
+1. **BPU & FSU Logic**: Implement the simulated FSU multipliers, adders, and Vector Buffers (VB-A, VB-B) to hold intermediate values.
+2. **Command Execution Hooks**:
+   - `MAC`: Fetch K^T from `BankStorage`, compute QK, accumulate in VB-B.
+   - `MOV`/`EMUL`: Apply ReLU to VB-B, generate bitmask, multiply with wE, store P in VB-A.
+   - `SPM`: Selectively read V from `BankStorage` using the bitmask (VDI), compute PV, and accumulate.
+   - `ACC`: Transfer final partial-sums to the channel-level accumulator (CA) in FP32.
+3. **DSSE Integration**: Ensure metadata (VDI, VOC) derived from the bitmask dictates the memory accesses during the `SPM` phase.
+
+### Phase 4: Output Comparison & Debugging
+1. **Automated Validation**: Compare the final outputs from the channel accumulators against the Golden Model outputs (checking `abs/rel <= 1e-2`).
+2. **Debugging Utilities**: Add optional dump files to trace mismatched tensors, intermediate scores, or incorrect bitmasks.
+3. **Integration Testing**: Run full validations on the four target model configurations (GPT-baby, GPT-3-small, TinyLlama, Llama3.2-3B).
 
 ## 8. Step-By-Step Progress
 
 ### Step 1: HBM3 Command And Timing Layer
-
 Status: complete.
 
 ### Step 2: SPARE-PIM Controller
-
 Status: complete.
 
 ### Step 3: SPAREPIMTrace Frontend
-
 Status: complete.
 
 ### Step 4: ESDM Performance/Page-Hit Modeling
-
 Status: complete.
 
-### Step 5: Functional Dataflow And Golden Model
-
+### Step 5: Golden Model & Reference Data Generation (Phase 1)
 Status: planned next.
+
+### Step 6: Bank-Resident Storage & ESDM Loader (Phase 2)
+Status: planned.
+
+### Step 7: Functional SPARE-PIM Dataflow Execution (Phase 3)
+Status: planned.
+
+### Step 8: Output Comparison & Debugging (Phase 4)
+Status: planned.

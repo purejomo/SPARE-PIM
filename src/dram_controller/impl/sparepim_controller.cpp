@@ -1,9 +1,13 @@
 #include <algorithm>
 #include <deque>
 #include <vector>
+#include <iostream>
 
 #include "dram_controller/controller.h"
 #include "memory_system/memory_system.h"
+#include "bank_storage.h"
+#include "../../golden/tensor_utils.h"
+#include "../../golden/elemax_sdpa.h"
 
 namespace Ramulator {
 
@@ -113,6 +117,23 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
     size_t s_esdm_pv_page_hits = 0;
     size_t s_esdm_spm_skipped_act_pre_cmds = 0;
 
+    // Functional Dataflow 
+    BankStorageManager m_bank_storage;
+    bool m_enable_functional = true;
+    int m_seq_len = 256;
+    int m_d_head = 64;
+    int m_num_heads = 1;
+    int m_num_kv_heads = 1;
+    int m_batch_size = 1;
+    int m_current_sq = 0;
+
+    std::vector<Golden::fp16> m_q_tensor;
+    std::vector<Golden::fp16> m_k_tensor;
+    std::vector<Golden::fp16> m_v_tensor;
+    std::vector<Golden::fp16> m_we_tensor;
+    std::vector<float> m_golden_output;
+    std::vector<float> m_hw_output;
+
   public:
     void init() override {
       m_queue_size = param<int>("queue_size").default_val(32);
@@ -129,6 +150,12 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
       m_kt_col_start = param<int>("kt_col_start").default_val(0);
       m_v_col_start = param<int>("v_col_start").default_val(0);
       m_esdm_columns_per_row = param<int>("esdm_columns_per_row").default_val(-1);
+      m_enable_functional = param<bool>("enable_functional").default_val(false);
+      m_seq_len = param<int>("seq_len").default_val(256);
+      m_d_head = param<int>("d_head").default_val(64);
+      m_num_heads = param<int>("num_heads").default_val(1);
+      m_num_kv_heads = param<int>("num_kv_heads").default_val(1);
+      m_batch_size = param<int>("batch_size").default_val(1);
     };
 
     void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override {
@@ -193,6 +220,10 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
       register_stat(s_esdm_pv_rows).name("sparepim_esdm_pv_rows_{}", m_channel_id);
       register_stat(s_esdm_pv_page_hits).name("sparepim_esdm_pv_page_hits_{}", m_channel_id);
       register_stat(s_esdm_spm_skipped_act_pre_cmds).name("sparepim_esdm_skipped_act_pre_cmds_{}", m_channel_id);
+
+      if (m_enable_functional) {
+        setup_functional_data();
+      }
     };
 
     bool send(Request& req) override {
@@ -287,6 +318,11 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
 
     void expand_sparepim_token(const Request& req) {
       s_sparepim_tokens++;
+
+      if (m_enable_functional && m_current_sq < m_seq_len) {
+          execute_functional_token(m_current_sq);
+          m_current_sq++;
+      }
 
       AddrVec_t base_addr = normalize_addr(req.addr_vec);
       VOCSummary voc_summary = read_bgmu_vocs_and_find_max(req);
@@ -635,6 +671,144 @@ class SPAREPIMController final : public IDRAMController, public Implementation {
         s_sparepim_act_cmds++;
       } else if (command == m_cmd_pre) {
         s_sparepim_pre_cmds++;
+      }
+    }
+
+    void setup_functional_data() {
+      Golden::generate_q_tensor(m_q_tensor, m_batch_size, m_num_heads, m_seq_len, m_d_head);
+      Golden::generate_k_tensor(m_k_tensor, m_batch_size, m_num_kv_heads, m_seq_len, m_d_head);
+      Golden::generate_v_tensor(m_v_tensor, m_batch_size, m_num_kv_heads, m_seq_len, m_d_head);
+      Golden::generate_we_tensor(m_we_tensor, m_batch_size, m_num_heads, m_seq_len);
+
+      Golden::ElemaxSDPA golden_model(m_batch_size, m_num_heads, m_num_kv_heads, m_seq_len, m_d_head);
+      golden_model.compute(m_q_tensor, m_k_tensor, m_v_tensor, m_we_tensor, m_golden_output);
+      
+      m_hw_output.assign(m_golden_output.size(), 0.0f);
+
+      int fsu_width = BankStorageManager::FP16_PER_COLUMN; 
+      AddrVec_t logical_base = normalize_addr({});
+      int cols_per_kt = (m_d_head + fsu_width - 1) / fsu_width;
+
+      for (int sk = 0; sk < m_seq_len; ++sk) {
+        for (int d = 0; d < m_d_head; d += fsu_width) {
+          int chunk = std::min(fsu_width, m_d_head - d);
+          std::vector<Golden::fp16> col_data(fsu_width, Golden::fp16(0.0f));
+          for (int i = 0; i < chunk; ++i) {
+            size_t k_idx = 0 * (m_num_kv_heads * m_seq_len * m_d_head) + 0 + sk * m_d_head + d + i;
+            col_data[i] = m_k_tensor[k_idx];
+          }
+          int logical_col_kt = sk * cols_per_kt + (d / fsu_width);
+          AddrVec_t esdm_addr = make_esdm_addr(logical_base, m_kt_row_offset, m_kt_col_start + logical_col_kt);
+          
+          for (int pch = 0; pch < m_num_pchs; pch++) {
+            for (int bg = 0; bg < m_num_bgs; bg++) {
+              for (int bank = 0; bank < m_num_banks; bank++) {
+                m_bank_storage.write_col(m_channel_id, pch, bg, bank, esdm_addr[m_row_level], esdm_addr[m_col_level], col_data);
+              }
+            }
+          }
+        }
+
+        for (int d = 0; d < m_d_head; d += fsu_width) {
+          int chunk = std::min(fsu_width, m_d_head - d);
+          std::vector<Golden::fp16> v_col_data(fsu_width, Golden::fp16(0.0f));
+          for (int i = 0; i < chunk; ++i) {
+            size_t v_idx = 0 * (m_num_kv_heads * m_seq_len * m_d_head) + 0 + sk * m_d_head + d + i;
+            v_col_data[i] = m_v_tensor[v_idx];
+          }
+          int logical_col_v = sk * cols_per_kt + (d / fsu_width);
+          AddrVec_t esdm_v_addr = make_esdm_addr(logical_base, m_v_row_offset, m_v_col_start + logical_col_v);
+          
+          for (int pch = 0; pch < m_num_pchs; pch++) {
+            for (int bg = 0; bg < m_num_bgs; bg++) {
+              for (int bank = 0; bank < m_num_banks; bank++) {
+                m_bank_storage.write_col(m_channel_id, pch, bg, bank, esdm_v_addr[m_row_level], esdm_v_addr[m_col_level], v_col_data);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    void execute_functional_token(int sq) {
+        int b = 0;
+        int h = 0; 
+        int kv_h = 0;
+        int fsu_width = BankStorageManager::FP16_PER_COLUMN; 
+        int cols_per_kt = (m_d_head + fsu_width - 1) / fsu_width;
+
+        AddrVec_t logical_base = normalize_addr({});
+        std::vector<Golden::fp16> VB_B(m_seq_len, Golden::fp16(0.0f));
+        std::vector<Golden::fp16> VB_A(m_seq_len, Golden::fp16(0.0f));
+        std::vector<uint8_t> bitmask(m_seq_len, 0);
+
+        for (int sk = 0; sk < m_seq_len; ++sk) {
+            float score = 0.0f;
+            for (int d = 0; d < m_d_head; d += fsu_width) {
+                int logical_col_kt = sk * cols_per_kt + (d / fsu_width);
+                AddrVec_t esdm_addr = make_esdm_addr(logical_base, m_kt_row_offset, m_kt_col_start + logical_col_kt);
+                
+                auto col_data = m_bank_storage.read_col(m_channel_id, 0, 0, 0, esdm_addr[m_row_level], esdm_addr[m_col_level]);
+                
+                int chunk = std::min(fsu_width, m_d_head - d);
+                for (int i = 0; i < chunk; ++i) {
+                    size_t q_idx = b * (m_num_heads * m_seq_len * m_d_head) + h * (m_seq_len * m_d_head) + sq * m_d_head + d + i;
+                    float q_val = static_cast<float>(m_q_tensor[q_idx]);
+                    float k_val = static_cast<float>(col_data[i]);
+                    score += q_val * k_val;
+                }
+            }
+            VB_B[sk] = Golden::fp16(score);
+        }
+
+        for (int sk = 0; sk < m_seq_len; ++sk) {
+            float relu_s = std::max(0.0f, static_cast<float>(VB_B[sk]));
+            bitmask[sk] = (relu_s > 0.0f) ? 1 : 0;
+
+            size_t we_idx = b * (m_num_heads * m_seq_len) + h * m_seq_len + sq;
+            float we_val = static_cast<float>(m_we_tensor[we_idx]);
+            VB_A[sk] = Golden::fp16(we_val * relu_s);
+        }
+
+        for (int d = 0; d < m_d_head; ++d) {
+            float pv_acc = 0.0f;
+            for (int sk = 0; sk < m_seq_len; ++sk) {
+                if (bitmask[sk]) {
+                    int logical_col_v = sk * cols_per_kt + (d / fsu_width);
+                    AddrVec_t esdm_v_addr = make_esdm_addr(logical_base, m_v_row_offset, m_v_col_start + logical_col_v);
+                    auto v_col_data = m_bank_storage.read_col(m_channel_id, 0, 0, 0, esdm_v_addr[m_row_level], esdm_v_addr[m_col_level]);
+                    
+                    float p_val = static_cast<float>(VB_A[sk]);
+                    int v_offset = d % fsu_width; 
+                    float v_val = static_cast<float>(v_col_data[v_offset]);
+                    
+                    pv_acc += p_val * v_val;
+                }
+            }
+            size_t out_idx = b * (m_num_heads * m_seq_len * m_d_head) + h * (m_seq_len * m_d_head) + sq * m_d_head + d;
+            m_hw_output[out_idx] = pv_acc;
+        }
+    }
+
+    void finalize() override {
+      if (m_enable_functional) {
+        std::cout << "==========================================\n";
+        std::cout << "[SPARE-PIM] Finalizing Functional Simulation\n";
+        
+        // Resize golden output to only compare the tokens actually processed
+        size_t processed_elements = m_current_sq * m_d_head;
+        m_hw_output.resize(processed_elements);
+        m_golden_output.resize(processed_elements);
+
+        bool passed = Golden::compare_tensors(m_hw_output, m_golden_output, 1e-2f, 1e-2f);
+        if (passed) {
+          std::cout << "[SPARE-PIM] Status: PASSED (Outputs match Golden Model for " << m_current_sq << " tokens)\n";
+        } else {
+          std::cerr << "[SPARE-PIM] Status: FAILED (Outputs mismatch)\n";
+          Golden::dump_fp32_tensor("debug_hw_output.txt", m_hw_output, m_current_sq, m_d_head);
+          Golden::dump_fp32_tensor("debug_golden_output.txt", m_golden_output, m_current_sq, m_d_head);
+        }
+        std::cout << "==========================================\n";
       }
     }
 };
